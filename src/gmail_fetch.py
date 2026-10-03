@@ -16,13 +16,21 @@ Design choices that follow directly from the requirements:
 from __future__ import annotations
 
 import base64
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from email.utils import parseaddr, parsedate_to_datetime
+from html import unescape
 
 from src.classifier import classify_and_summarize
 
 HEADERS_FOR_FILTER = ["From", "Subject", "Date", "List-Unsubscribe"]
+
+# Blocks whose CONTENT must be dropped, not just their tags -- a naive
+# "strip every <tag>" pass leaves the CSS/JS/comment text behind as if it
+# were part of the message, which is what was leaking into summaries.
+_HTML_BLOCK_PATTERN = re.compile(r"<(style|script)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
+_HTML_COMMENT_PATTERN = re.compile(r"<!--.*?-->", re.DOTALL)
 
 
 @dataclass
@@ -76,12 +84,16 @@ def _decode_body(payload: dict) -> str:
     raw = part["body"]["data"]
     text = base64.urlsafe_b64decode(raw.encode("utf-8")).decode("utf-8", errors="replace")
     if part.get("mimeType") == "text/html":
-        # Extremely small HTML->text step. We only need enough plain text for
-        # keyword matching / a short summary, not a pixel-perfect rendering.
-        import re
-
+        # Small HTML->text step. We only need enough plain text for keyword
+        # matching / a short summary, not a pixel-perfect rendering -- but
+        # the content of <style>/<script> blocks and HTML comments must be
+        # dropped entirely (not just their tags), or CSS rules and
+        # conditional-comment markup leak into the text as if they were
+        # part of the message.
+        text = _HTML_BLOCK_PATTERN.sub(" ", text)
+        text = _HTML_COMMENT_PATTERN.sub(" ", text)
         text = re.sub(r"<[^>]+>", " ", text)
-        text = re.sub(r"&nbsp;", " ", text)
+        text = unescape(text)  # &nbsp;, &amp;, etc. -> real characters
         text = re.sub(r"\s+", " ", text)
     return text.strip()
 
